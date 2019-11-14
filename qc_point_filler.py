@@ -21,15 +21,27 @@
  *                                                                         *
  ***************************************************************************/
 """
+from pathlib import Path
+import pandas as pd
+
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsProject, QgsVectorLayer, QgsVectorLayerJoinInfo, QgsProject, QgsExpression, Qgis, QgsField
+from PyQt5.QtWidgets import QAbstractItemView, QAction, QMessageBox
+from PyQt5.QtCore import QVariant
 
 # Initialize Qt resources from file resources.py
 from .resources import *
 # Import the code for the dialog
 from .qc_point_filler_dialog import QCPointFillerDialog
 import os.path
+
+BASE_DIR = Path(__file__).resolve().parent
+CSV = BASE_DIR.joinpath('csv/classes.csv')
+CSV_POINTS = BASE_DIR.joinpath('csv/classes_for_points.csv')
+CSV_AREAS = BASE_DIR.joinpath('csv/hatitat_tile_intersection_areas.csv')
+
 
 
 class QCPointFiller:
@@ -179,6 +191,94 @@ class QCPointFiller:
                 action)
             self.iface.removeToolBarIcon(action)
 
+    def check_if_file_is_points(self, layer):
+        points = True
+        if not layer.geometryType() == 0:
+            points = False
+        return points
+
+    def fill_fields(self, layer, name):
+        """Join shapefile to csv and fill in the missing fields based on sub ID"""
+        error_id = []
+        try:
+            infoLyr = QgsVectorLayer(f'file:///{str(CSV)}?delimiter=,','classes', 'delimitedtext')
+            QgsProject.instance().addMapLayer(infoLyr)
+            csv_field = 'Int_SubNum'
+            shp_field = 'QC_subnum'
+            joinObject = QgsVectorLayerJoinInfo()
+            joinObject.setJoinFieldName(csv_field)
+            joinObject.setTargetFieldName(shp_field)
+            joinObject.setJoinLayerId(infoLyr.id())
+            joinObject.setUsingMemoryCache(True)
+            joinObject.setJoinLayer(infoLyr)
+            layer.addJoin(joinObject)
+            layer.startEditing()
+            for feature in layer.getFeatures():
+                shp_fields = ['QC_num', 'QC_name', 'QC_subname']
+                csv_fields = ['classes_Int_num', 'classes_Int_cls', 'classes_Int_SubCls']
+                for shp, csv in zip(shp_fields, csv_fields):
+                    f = layer.fields().indexFromName(csv)
+                    f_ = layer.fields().indexFromName(shp)
+                    layer.changeAttributeValue(feature.id(), f_, feature[f])
+                qc_by = layer.fields().indexFromName('QC_by')
+                layer.changeAttributeValue(feature.id(), qc_by, name)
+                if not feature[f_]:
+                    print(f'Incorrect sub-class ID in: {feature.id()}')
+                    error_id.append(feature.id())
+        except KeyError as e:
+            print(f'There is an incorrect value in the sub-class field in ID {feature.id()}', e)
+        finally:
+            layer.removeJoin(infoLyr.id())
+            QgsProject.instance().removeMapLayer(infoLyr)
+            layer.commitChanges()
+            if error_id:
+                QMessageBox.critical(self.iface.mainWindow(),
+                            'Error with Sub-class ID!',
+                            f"There seems to be incorrect subclass numeric ID s in the following IDs: {error_id}. Please double-check these?")
+
+    def calculate_statistics(self, layer, folder):
+        """Creates a csv of accuracy percentage between QC and Interpretation"""
+        accuracy_csv = folder.joinpath(f'{layer.name()}_interpaccuracy.csv')
+        df_dict = {'ORTHOID': [], 'First_run_accuracy%': []}
+        int_field = 'Hab_subnum'
+        qc_field = 'QC_subnum'
+        orthoid = ('_').join(layer.name().split('_')[:3])
+        int_ = layer.fields().indexFromName(int_field)
+        qc = layer.fields().indexFromName(qc_field)
+        matching_values_counter = 0
+        no_rows = layer.featureCount()
+        for feature in layer.getFeatures():
+            if feature[int_] == feature[qc]:
+                matching_values_counter += 1
+        accuracy = (matching_values_counter/no_rows) * 100
+        df_dict['ORTHOID'].append(orthoid)
+        df_dict['First_run_accuracy%'].append(accuracy)
+        df_accuracy = pd.DataFrame(data=df_dict)
+        df_accuracy.to_csv(accuracy_csv, index=False)
+        return accuracy
+
+    def fill_fields_and_calc_stats(self, layer, name):
+        filename = Path(layer.source().split('|')[0]).resolve()
+        if filename.exists():
+            folder = filename.parent
+            if self.check_if_file_is_points(layer):
+                self.fill_fields(layer, name)
+                accuracy = self.calculate_statistics(layer, folder)
+                QMessageBox.information(self.iface.mainWindow(),
+                                'Success',
+                                f"Point shapefile saved successfully. Interpretation accuracy - {accuracy}%")   
+            #Not a point file error
+            else:
+                QMessageBox.critical(self.iface.mainWindow(),
+                                'Error! Not point file',
+                                "Please choose a shapefile before continuing. This should be amended the tool rerun as it will affect the accuracy statistics.")
+                raise IOError('Please input point file type')
+        else:
+            QMessageBox.critical(self.iface.mainWindow(),
+                            f'Error! Layer {layer.name()} not saved',
+                            "Please save the selected layer before continuing.")
+            
+
 
     def run(self):
         """Run method that performs all the real work"""
@@ -189,7 +289,15 @@ class QCPointFiller:
             self.first_start = False
             self.dlg = QCPointFillerDialog()
 
+         # Fetch the currently loaded layers
+        layers = QgsProject.instance().layerTreeRoot().children()
+        
+        # Clear the contents of the comboBox from previous runs
+        self.dlg.comboBox.clear()
+        # Populate the comboBox with names of all the loaded layers
+        self.dlg.comboBox.addItems([layer.name() for layer in layers])
         # show the dialog
+        self.dlg.lineEdit.clear()
         self.dlg.show()
         # Run the dialog event loop
         result = self.dlg.exec_()
@@ -197,4 +305,7 @@ class QCPointFiller:
         if result:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
-            pass
+            selected_layer_index = self.dlg.comboBox.currentIndex()
+            selected_layer = layers[selected_layer_index].layer()
+            name = self.dlg.lineEdit.text()
+            self.fill_fields_and_calc_stats(selected_layer, name)
