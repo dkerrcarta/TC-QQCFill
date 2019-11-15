@@ -27,7 +27,7 @@ import pandas as pd
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from qgis.core import QgsProject, QgsVectorLayer, QgsVectorLayerJoinInfo, QgsProject, QgsExpression, Qgis, QgsField
+from qgis.core import QgsProject, QgsVectorLayer, QgsVectorLayerJoinInfo, QgsProject, QgsExpression, Qgis, QgsField, NULL
 from PyQt5.QtWidgets import QAbstractItemView, QAction, QMessageBox
 from PyQt5.QtCore import QVariant
 
@@ -199,7 +199,6 @@ class QCPointFiller:
 
     def fill_fields(self, layer, name):
         """Join shapefile to csv and fill in the missing fields based on sub ID"""
-        error_id = []
         try:
             infoLyr = QgsVectorLayer(f'file:///{str(CSV)}?delimiter=,','classes', 'delimitedtext')
             QgsProject.instance().addMapLayer(infoLyr)
@@ -222,15 +221,21 @@ class QCPointFiller:
                     layer.changeAttributeValue(feature.id(), f_, feature[f])
                 qc_by = layer.fields().indexFromName('QC_by')
                 layer.changeAttributeValue(feature.id(), qc_by, name)
-                if not feature[f_]:
-                    print(f'Incorrect sub-class ID in: {feature.id()}')
-                    error_id.append(feature.id())
         except KeyError as e:
             print(f'There is an incorrect value in the sub-class field in ID {feature.id()}', e)
         finally:
+            error_id = []
             layer.removeJoin(infoLyr.id())
             QgsProject.instance().removeMapLayer(infoLyr)
             layer.commitChanges()
+            for feature in layer.getFeatures():
+                shp_field = 'QC_num'
+                f_ = layer.fields().indexFromName(shp_field)
+                if feature[f_] == NULL:
+                    print(feature[f_])
+                    print(f'Incorrect sub-class ID in: {feature.id()}')
+                    error_id.append(feature.id())
+
             if error_id:
                 QMessageBox.critical(self.iface.mainWindow(),
                             'Error with Sub-class ID!',
@@ -238,7 +243,7 @@ class QCPointFiller:
 
     def calculate_statistics(self, layer, folder):
         """Creates a csv of accuracy percentage between QC and Interpretation"""
-        accuracy_csv = folder.joinpath(f'{layer.name()}_interpaccuracy.csv')
+        accuracy_csv = folder.joinpath(f'{layer.name()}_accuracy.csv')
         df_dict = {'ORTHOID': [], 'First_run_accuracy%': []}
         int_field = 'Hab_subnum'
         qc_field = 'QC_subnum'
